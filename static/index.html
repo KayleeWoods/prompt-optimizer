@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Optimizer</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --border: #2a2f3a;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #4f8cff; --good: #3ecf8e; --bad: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 760px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 6px; }
+  textarea, input, select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; font: inherit; margin-bottom: 14px;
+  }
+  textarea { min-height: 110px; resize: vertical; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--border); font-weight: 500;
+  }
+  #status { font-size: 13px; color: var(--dim); margin-top: 10px; min-height: 18px; }
+  #log {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px; font: 12px/1.7 ui-monospace, monospace; color: var(--dim);
+    white-space: pre-wrap; max-height: 260px; overflow-y: auto; display: none;
+  }
+  .hist { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 14px; }
+  .hist th, .hist td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .hist th { color: var(--dim); font-weight: 500; }
+  .score { font-family: ui-monospace, monospace; }
+  .good { color: var(--good); } .bad { color: var(--bad); }
+  .best-label { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  #bestPrompt {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px; font: 13px/1.6 ui-monospace, monospace; white-space: pre-wrap;
+    max-height: 340px; overflow-y: auto;
+  }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; margin-bottom: 8px; }
+  #report { font: 12px/1.6 ui-monospace, monospace; color: var(--dim); white-space: pre-wrap; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Prompt Optimizer</h1>
+  <p class="sub">Describe the task → AI writes prompt + test cases → eval harness scores → auto-revise loops until best.</p>
+
+  <div class="panel">
+    <label for="task">Task description (rough is fine)</label>
+    <textarea id="task" placeholder="e.g. A system prompt for a support bot that answers refund questions for an Indonesian e-commerce, in Bahasa Indonesia, max 3 sentences, always ends with a question."></textarea>
+    <div class="row">
+      <div>
+        <label for="rounds">Iterations</label>
+        <input id="rounds" type="number" value="3" min="1" max="8">
+      </div>
+      <div>
+        <label for="cases">Test cases</label>
+        <input id="cases" type="number" value="5" min="2" max="12">
+      </div>
+      <div>
+        <label for="model">Model</label>
+        <input id="model" type="text" placeholder="gpt-4o-mini">
+      </div>
+    </div>
+    <button id="runBtn">Optimize</button>
+    <div id="status"></div>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="result" class="panel hide">
+    <div class="best-label">
+      <strong>Best prompt — <span id="bestLabel"></span> · score <span id="bestScore" class="score"></span></strong>
+      <button class="ghost" id="copyBtn">Copy</button>
+    </div>
+    <div id="bestPrompt"></div>
+
+    <h3 style="font-size:14px; margin:18px 0 8px;">Iteration history</h3>
+    <table class="hist">
+      <thead><tr><th>Round</th><th>Prompt</th><th>Score</th></tr></thead>
+      <tbody id="histBody"></tbody>
+    </table>
+
+    <details>
+      <summary>Harness report (per-case)</summary>
+      <div id="report"></div>
+    </details>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pollTimer = null;
+
+$("runBtn").onclick = async () => {
+  const task = $("task").value.trim();
+  if (!task) { $("status").textContent = "Task description is required."; return; }
+  $("runBtn").disabled = true;
+  $("result").classList.add("hide");
+  $("log").style.display = "block";
+  $("log").textContent = "";
+  $("status").textContent = "Starting job...";
+
+  const resp = await fetch("/api/optimize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task,
+      rounds: +$("rounds").value || 3,
+      cases: +$("cases").value || 5,
+      model: $("model").value.trim() || undefined,
+    }),
+  });
+  const { job_id, error } = await resp.json();
+  if (error) { $("status").textContent = error; $("runBtn").disabled = false; return; }
+  pollTimer = setInterval(() => poll(job_id), 1500);
+};
+
+async function poll(jobId) {
+  const resp = await fetch(`/api/jobs/${jobId}`);
+  const job = await resp.json();
+  $("log").textContent = (job.log || []).join("\n");
+  $("log").scrollTop = $("log").scrollHeight;
+  const sc = job.best_score != null ? ` · best ${job.best_score.toFixed(3)}` : "";
+  $("status").textContent = `${job.status}: ${job.step}${sc}`;
+
+  if (job.status === "done") {
+    clearInterval(pollTimer);
+    const r = await (await fetch(`/api/jobs/${jobId}/result`)).json();
+    showResult(r);
+    $("runBtn").disabled = false;
+  } else if (job.status === "error") {
+    clearInterval(pollTimer);
+    $("runBtn").disabled = false;
+  }
+}
+
+function showResult(r) {
+  $("result").classList.remove("hide");
+  $("bestLabel").textContent = r.best.label;
+  const bs = $("bestScore");
+  bs.textContent = r.best.score.toFixed(3);
+  bs.className = "score " + (r.best.score >= 0.8 ? "good" : r.best.score < 0.5 ? "bad" : "");
+  $("bestPrompt").textContent = r.best_prompt;
+  $("histBody").innerHTML = (r.history || []).map(h => `
+    <tr>
+      <td>${h.round}</td>
+      <td><code>${h.label}</code></td>
+      <td class="score ${h.score >= 0.8 ? "good" : h.score < 0.5 ? "bad" : ""}">${h.score.toFixed(3)}</td>
+    </tr>`).join("");
+  $("report").textContent = r.report_md || "(no report)";
+  $("result").scrollIntoView({ behavior: "smooth" });
+}
+
+$("copyBtn").onclick = () => {
+  navigator.clipboard.writeText($("bestPrompt").textContent);
+  $("copyBtn").textContent = "Copied";
+  setTimeout(() => ($("copyBtn").textContent = "Copy"), 1200);
+};
+</script>
+</body>
+</html>
